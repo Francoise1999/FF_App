@@ -888,7 +888,6 @@ async function renderCategories(container) {
 
 async function renderBills(container) {
   const [bills, allAccounts]=await Promise.all([getBills(), getAccounts()]);
-  const allAccounts=await getAccounts();
   const now=new Date();
   const upcoming=bills.filter(b=>{const d=b.dueDate?.toDate?b.dueDate.toDate():new Date(b.dueDate);return d>=now&&!b.paid;});
   const past=bills.filter(b=>{const d=b.dueDate?.toDate?b.dueDate.toDate():new Date(b.dueDate);return d<now||b.paid;});
