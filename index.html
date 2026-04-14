@@ -1300,7 +1300,7 @@ async function renderProgress(container) {
   // Build budget progress HTML
   let budgetHTML = '';
   if (budgets.length===0) {
-    budgetHTML = '<div class="empty-state"><div class="empty-icon">◉</div><div class="empty-title">Aucun budget défini</div><div class="empty-sub">Créez des budgets pour suivre vos dépenses</div><button class="btn-primary" style="margin-top:12px" onclick="navigateTo('budgets')">Créer un budget</button></div>';
+    budgetHTML = '<div class="empty-state"><div class="empty-icon">◉</div><div class="empty-title">Aucun budget défini</div><div class="empty-sub">Créez des budgets pour suivre vos dépenses</div><button class="btn-primary" style="margin-top:12px" onclick="navigateTo("budgets")">Créer un budget</button></div>';
   } else {
     budgets.forEach(b=>{
       const spent = monthTx.filter(t=>t.category===b.category).reduce((s,t)=>s+t.amount,0);
@@ -1324,7 +1324,7 @@ async function renderProgress(container) {
   // Build debt progress HTML
   let debtHTML = '';
   if (debts.length===0) {
-    debtHTML = '<div class="empty-state"><div class="empty-icon">💳</div><div class="empty-title">Aucune dette enregistrée</div><button class="btn-primary" style="margin-top:12px" onclick="navigateTo('debts')">Ajouter une dette</button></div>';
+    debtHTML = '<div class="empty-state"><div class="empty-icon">💳</div><div class="empty-title">Aucune dette enregistrée</div><button class="btn-primary" style="margin-top:12px" onclick="navigateTo("debts")">Ajouter une dette</button></div>';
   } else {
     debts.forEach(debt=>{
       const paid = (debt.originalAmount||0) - (debt.currentBalance||0);
@@ -1587,7 +1587,7 @@ document.getElementById('modal-overlay').onclick = (e)=>{ if(e.target===document
 document.getElementById('menu-btn').onclick = ()=>document.getElementById('sidebar').classList.toggle('open');
 document.getElementById('sidebar-close').onclick = ()=>document.getElementById('sidebar').classList.remove('open');
 document.getElementById('quick-add-btn').onclick = ()=>{
-  if(currentPage!=='transactions') navigateTo('transactions');
+  if(currentPage!=='transactions') navigateTo("transactions");
   setTimeout(()=>document.getElementById('add-tx-btn')?.click(), 400);
 };
 </script>
