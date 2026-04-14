@@ -207,6 +207,19 @@ textarea{resize:vertical;min-height:80px}.form-row{display:grid;grid-template-co
   #toast-container{bottom:90px;right:12px;left:12px}
 }
 @media(max-width:480px){.stats-grid{grid-template-columns:1fr}}
+
+/* ── DEBT CARDS ─────────────────────────────────────── */
+.debt-card{background:var(--surface);border:1px solid rgba(252,129,129,.2);border-radius:var(--radius);padding:18px;position:relative;overflow:hidden;transition:.2s}
+.debt-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
+.debt-card.credit-card::before{background:var(--purple)}
+.debt-card.cash-debt::before{background:var(--red)}
+.debt-card.loan::before{background:var(--orange)}
+.debt-card.other-debt::before{background:var(--text3)}
+.debt-card:hover{border-color:rgba(252,129,129,.45);transform:translateY(-2px)}
+.debt-card .acc-type{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px}
+.debt-card .acc-name{font-size:14px;font-weight:700;margin-bottom:10px}
+.toast.budget-alert{border-left:3px solid var(--orange);background:rgba(246,173,85,.08)}
+.toast.budget-over{border-left:3px solid var(--red);background:rgba(252,129,129,.08)}
 </style>
 </head>
 <body>
@@ -244,6 +257,7 @@ textarea{resize:vertical;min-height:80px}.form-row{display:grid;grid-template-co
       <a href="#" class="nav-item active" data-page="dashboard"><span class="nav-icon">⬡</span> Tableau de bord</a>
       <div class="nav-label">Finances</div>
       <a href="#" class="nav-item" data-page="accounts"><span class="nav-icon">◎</span> Comptes</a>
+      <a href="#" class="nav-item" data-page="debts"><span class="nav-icon">💳</span> Dettes</a>
       <a href="#" class="nav-item" data-page="transactions"><span class="nav-icon">⇄</span> Transactions</a>
       <a href="#" class="nav-item" data-page="budgets"><span class="nav-icon">◉</span> Budgets</a>
       <div class="nav-label">Organisation</div>
@@ -372,7 +386,38 @@ async function addTransaction(data) {
       await updateDoc(dref('accounts',data.accountId),{balance:bal+delta});
     }
   }
+  // Check budget alerts after expense
+  if(data.type==='expense' && data.category) {
+    checkBudgetAlert(data.category).catch(()=>{});
+  }
   return ref;
+}
+
+async function checkBudgetAlert(category) {
+  const [budgets, transactions] = await Promise.all([getBudgets(), getTransactions({limit:200})]);
+  const budget = budgets.find(b=>b.category===category);
+  if(!budget) return;
+  const now = new Date();
+  const monthTx = transactions.filter(tx=>{
+    const d=tx.date?.toDate?tx.date.toDate():new Date(tx.date);
+    return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear()&&tx.type==='expense'&&tx.category===category;
+  });
+  const spent = monthTx.reduce((s,t)=>s+t.amount,0);
+  const pct = budget.amount>0?(spent/budget.amount)*100:0;
+  if(pct>=100) {
+    const el=document.createElement('div');
+    el.className='toast budget-over';
+    el.innerHTML='🚨 Budget <strong>'+category+'</strong> dépassé! '+fmt(spent)+' / '+fmt(budget.amount);
+    document.getElementById('toast-container').appendChild(el);
+    setTimeout(()=>el.remove(),6000);
+    if(Notification.permission==='granted') new Notification('FinanceFlow — Budget dépassé',{body:'Budget '+category+' dépassé: '+fmt(spent)+' / '+fmt(budget.amount)});
+  } else if(pct>=80) {
+    const el=document.createElement('div');
+    el.className='toast budget-alert';
+    el.innerHTML='⚠️ Budget <strong>'+category+'</strong> à '+Math.round(pct)+'% — reste '+fmt(budget.amount-spent);
+    document.getElementById('toast-container').appendChild(el);
+    setTimeout(()=>el.remove(),5000);
+  }
 }
 async function deleteTransaction(id,data) {
   if(data?.accountId){const acc=await getDoc(dref('accounts',data.accountId));if(acc.exists()){const bal=acc.data().balance||0;const delta=data.type==='income'?-data.amount:data.amount;await updateDoc(dref('accounts',data.accountId),{balance:bal+delta});}}
@@ -406,6 +451,12 @@ async function getPlanned() { const s=await getDocs(col('planned')); return s.do
 async function addPlanned(data) { return addDoc(col('planned'),{...data,createdAt:Timestamp.now()}); }
 async function updatePlanned(id,data) { return updateDoc(dref('planned',id),data); }
 async function deletePlanned(id) { return deleteDoc(dref('planned',id)); }
+
+async function getDebts() { const s=await getDocs(col('debts')); return s.docs.map(d=>({id:d.id,...d.data()})); }
+async function addDebt(data) { return addDoc(col('debts'),{...data,createdAt:Timestamp.now()}); }
+async function updateDebt(id,data) { return updateDoc(dref('debts',id),data); }
+async function deleteDebt(id) { return deleteDoc(dref('debts',id)); }
+
 async function searchTransactions(term) {
   const all=await getTransactions();const t=term.toLowerCase();
   return all.filter(tx=>(tx.reason||'').toLowerCase().includes(t)||(tx.person||'').toLowerCase().includes(t)||(tx.category||'').toLowerCase().includes(t)||String(tx.amount).includes(t));
@@ -431,6 +482,8 @@ function daysUntil(ts){if(!ts)return null;const d=ts.toDate?ts.toDate():new Date
 
 const typeIcons={checking:'🏦',savings:'💰',credit:'💳',cash:'💵',investment:'📈'};
 const typeLabels={checking:'Compte courant',savings:'Épargne',credit:'Carte de crédit',cash:'Espèces',investment:'Investissement'};
+const debtTypeIcons={'credit-card':'💳','cash-debt':'💵','loan':'🏛️','other-debt':'📋'};
+const debtTypeLabels={'credit-card':'Carte de crédit','cash-debt':'Dette comptant','loan':'Prêt / Crédit','other-debt':'Autre dette'};
 const catColors=['#4fd1c5','#48bb78','#63b3ed','#b794f4','#f6ad55','#fc8181','#faf089','#76e4f7'];
 
 // ── AUTO-PAY BILLS ─────────────────────────────────────
@@ -893,7 +946,7 @@ async function renderBills(container) {
         <div style="font-size:12px;color:var(--text3)">Quand activé, la facture sera payée automatiquement à la date prévue et une notification sera envoyée.</div>
         <div class="form-group" id="autopay-account-group" style="margin-top:12px;margin-bottom:0;${b?.autoPay?'':'display:none'}">
           <label style="font-size:12px">Compte à débiter automatiquement</label>
-          <select id="bill-account">${allAccounts.map(a=>'<option value="'+a.id+'" '+(b?.accountId===a.id?'selected':'')+'>'+a.name+'</option>').join('')}</select>
+          <select id="bill-account">${allAccounts.map(a=>'<option value="'+a.id+'" '+(b?.accountId===a.id?'selected':'')+'>'+a.name+(a.type==="credit"?' 💳':'')+' — '+fmt(a.balance)+'</option>').join('')}</select>
         </div>
       </div>
       <div class="form-group"><label>Icône</label><div style="display:flex;flex-wrap:wrap;gap:6px">${BILL_ICONS.map(ic=>'<button onclick="window._selBillIcon(\''+ic+'\')" class="icon-btn" data-icon="'+ic+'" style="font-size:20px;background:'+(b?.icon===ic?'var(--surface2)':'none')+';border:1px solid '+(b?.icon===ic?'var(--accent)':'var(--border)')+';border-radius:8px;padding:6px;cursor:pointer">'+ic+'</button>').join('')}</div><input id="bill-icon" type="hidden" value="${b?.icon||'📄'}"/></div>
@@ -1024,7 +1077,7 @@ async function renderReports(container) {
     document.getElementById('report-output').innerHTML=`
       <div class="report-card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
-          <div><div style="font-size:20px;font-weight:700">Rapport ${periodLabel}</div><div style="font-size:13px;color:var(--text3);margin-top:4px">${filtered.length} transaction(s)</div></div>
+          <div><div style="font-size:20px;font-weight:700">Rapport mensuel de Marie Françoise Mentor</div><div style="font-size:13px;color:var(--text3);margin-top:2px">Type: ${periodLabel}</div><div style="font-size:13px;color:var(--text3);margin-top:4px">${filtered.length} transaction(s)</div></div>
           <div style="display:flex;gap:8px"><button class="btn-ghost" id="export-word">📝 Word</button><button class="btn-ghost" id="export-pdf">📄 PDF</button></div>
         </div>
         <div class="report-summary">
@@ -1045,7 +1098,7 @@ async function renderReports(container) {
     document.getElementById('export-pdf').onclick=()=>{
       const {jsPDF}=window.jspdf;const doc=new jsPDF();const pageW=doc.internal.pageSize.getWidth();let y=20;
       doc.setFillColor(15,18,24);doc.rect(0,0,pageW,40,'F');doc.setTextColor(79,209,197);doc.setFontSize(20);doc.setFont('helvetica','bold');doc.text('FinanceFlow',15,22);
-      doc.setTextColor(160,174,192);doc.setFontSize(11);doc.setFont('helvetica','normal');doc.text('Rapport '+periodLabel,15,33);doc.text(new Date().toLocaleDateString('fr-CA'),pageW-15,33,{align:'right'});y=55;
+      doc.setTextColor(160,174,192);doc.setFontSize(11);doc.setFont('helvetica','normal');doc.text('Rapport mensuel de Marie Françoise Mentor',15,27);doc.text('Type: '+periodLabel+' · '+new Date().toLocaleDateString('fr-CA'),15,34);doc.text(new Date().toLocaleDateString('fr-CA'),pageW-15,33,{align:'right'});y=55;
       [{label:'Revenus',value:fmt(income),color:[72,187,120]},{label:'Dépenses',value:fmt(expenses),color:[252,129,129]},{label:'Solde net',value:fmt(balance),color:balance>=0?[72,187,120]:[252,129,129]}].forEach((b,i)=>{const x=15+i*62;doc.setFillColor(26,32,48);doc.roundedRect(x,y,58,28,3,3,'F');doc.setTextColor(...b.color);doc.setFontSize(13);doc.setFont('helvetica','bold');doc.text(b.value,x+29,y+13,{align:'center'});doc.setTextColor(113,128,150);doc.setFontSize(8);doc.setFont('helvetica','normal');doc.text(b.label,x+29,y+21,{align:'center'});});y+=40;
       // Accounts
       doc.setTextColor(226,232,240);doc.setFontSize(12);doc.setFont('helvetica','bold');doc.text('État des comptes',15,y);y+=8;
@@ -1066,7 +1119,7 @@ async function renderReports(container) {
       const catRows=Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>'<tr><td>'+cat+'</td><td style="color:red;text-align:right">'+fmt(amt)+'</td><td style="text-align:right">'+Math.round(amt/expenses*100)+'%</td></tr>').join('');
       const txRows=filtered.map(tx=>{const d=tx.date?.toDate?tx.date.toDate():new Date(tx.date);const acc=accounts.find(a=>a.id===tx.accountId);return'<tr><td>'+d.toLocaleDateString('fr-CA')+'</td><td>'+(tx.reason||'—')+'</td><td>'+(tx.category||'Autre')+'</td><td>'+(tx.person||'—')+'</td><td>'+(acc?.name||'—')+'</td><td style="color:'+(tx.type==='income'?'green':'red')+';text-align:right">'+(tx.type==='income'?'+':'-')+fmt(tx.amount)+'</td></tr>';}).join('');
       const html='<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><style>body{font-family:Calibri,sans-serif}h1{color:#2d3748;border-bottom:2px solid #4fd1c5;padding-bottom:8px}h2{color:#2d3748;margin-top:20px}.summary{display:flex;gap:20px;margin:16px 0}.stat-box{border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center;flex:1}.stat-val{font-size:18px;font-weight:700}.stat-lbl{font-size:11px;color:#718096}table{width:100%;border-collapse:collapse;margin-top:10px}th{background:#2d3748;color:white;padding:7px;text-align:left;font-size:11px}td{padding:7px;border-bottom:1px solid #e2e8f0;font-size:11px}tr:nth-child(even){background:#f7fafc}</style></head><body>'+
-        '<h1>◈ FinanceFlow — Rapport '+periodLabel+'</h1><p style="color:#718096">Généré le '+new Date().toLocaleDateString('fr-CA')+' · '+filtered.length+' transaction(s)</p>'+
+        '<h1>◈ FinanceFlow — Rapport mensuel de Marie Françoise Mentor</h1><h2 style="color:#4fd1c5;font-size:14px;margin-top:4px">Type: '+periodLabel+'</h2><p style="color:#718096">Généré le '+new Date().toLocaleDateString('fr-CA')+' · '+filtered.length+' transaction(s)</p>'+
         '<div class="summary"><div class="stat-box"><div class="stat-val" style="color:green">'+fmt(income)+'</div><div class="stat-lbl">Revenus</div></div><div class="stat-box"><div class="stat-val" style="color:red">'+fmt(expenses)+'</div><div class="stat-lbl">Dépenses</div></div><div class="stat-box"><div class="stat-val" style="color:'+(balance>=0?'green':'red')+'">'+fmt(balance)+'</div><div class="stat-lbl">Solde net</div></div></div>'+
         '<h2>État des comptes</h2><table><thead><tr><th>Compte</th><th>Type</th><th>Solde</th></tr></thead><tbody>'+acctRows+'</tbody></table>'+
         (Object.keys(byCat).length?'<h2>Dépenses par catégorie</h2><table><thead><tr><th>Catégorie</th><th>Montant</th><th>%</th></tr></thead><tbody>'+catRows+'</tbody></table>':'')+
@@ -1104,9 +1157,196 @@ async function renderSearch(container) {
 }
 
 // ── ROUTER ─────────────────────────────────────────────
+
+// ── DETTES PAGE ─────────────────────────────────────────
+async function renderDebts(container) {
+  const debts = await getDebts();
+  const accounts = await getAccounts();
+  const activeDebts = debts.filter(d=>!d.settled);
+  const settledDebts = debts.filter(d=>d.settled);
+  const totalOwed = activeDebts.reduce((s,d)=>s+(d.currentBalance||d.amount||0),0);
+  const totalMin = activeDebts.reduce((s,d)=>s+(d.minimumPayment||0),0);
+
+  const renderDebtCard = (debt) => {
+    const balance = debt.currentBalance!==undefined ? debt.currentBalance : (debt.amount||0);
+    const original = debt.originalAmount || debt.amount || balance;
+    const paid = original - balance;
+    const pct = original>0 ? Math.min(100,Math.max(0,(paid/original)*100)) : 0;
+    const barColor = pct>=75?'var(--green)':pct>=40?'var(--accent)':'var(--orange)';
+    const typeIcon = debtTypeIcons[debt.debtType]||'📋';
+    const typeLabel = debtTypeLabels[debt.debtType]||'Dette';
+    return '<div class="debt-card '+(debt.debtType||'other-debt')+'">'
+      +'<div class="acc-type">'+typeIcon+' '+typeLabel+'</div>'
+      +'<div class="acc-name">'+debt.name+'</div>'
+      +(debt.creditor?'<div style="font-size:11px;color:var(--text3);margin-bottom:6px">👤 '+debt.creditor+'</div>':'')
+      +(debt.reason?'<div style="font-size:11px;color:var(--text2);margin-bottom:8px;font-style:italic">'+debt.reason+'</div>':'')
+      +'<div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--red)">'+fmt(balance)+'</div>'
+      +'<div style="font-size:11px;color:var(--text3);margin-top:2px">Original: '+fmt(original)+'</div>'
+      +'<div style="margin:10px 0"><div class="progress-bar"><div class="progress-fill" style="width:'+pct+'%;background:'+barColor+'"></div></div><div style="font-size:11px;color:var(--text3);margin-top:3px">'+Math.round(pct)+'% remboursé</div></div>'
+      +(debt.minimumPayment?'<div style="font-size:12px;margin-bottom:3px">Min: <span style="color:var(--orange);font-family:var(--mono)">'+fmt(debt.minimumPayment)+'/mois</span></div>':'')
+      +(debt.interestRate?'<div style="font-size:12px;margin-bottom:3px">Taux: <span style="color:var(--red)">'+debt.interestRate+'%</span></div>':'')
+      +(debt.nextPaymentDate?'<div style="font-size:11px;color:var(--text3);margin-bottom:8px">Prochain: '+fmtDate(debt.nextPaymentDate)+'</div>':'')
+      +(debt.settled?'<div style="font-size:13px;color:var(--green);font-weight:700;margin-bottom:8px">✓ Remboursée</div>':'')
+      +'<div style="display:flex;gap:6px;margin-top:12px">'
+      +(!debt.settled?'<button class="btn-primary" style="flex:1;padding:6px;font-size:11px" onclick="window._debtPay(\''+debt.id+'\')">💳 Paiement</button>':'')
+      +'<button class="btn-ghost" style="padding:6px 10px;font-size:11px" onclick="window._editDebt(\''+debt.id+'\')">✎</button>'
+      +'<button class="btn-danger" style="padding:6px 8px;font-size:11px" onclick="window._deleteDebt(\''+debt.id+'\',\''+debt.name.replace(/'/g,"\\'\'")+'\'">✕</button>'
+      +'</div></div>';
+  };
+
+  // Credit card accounts shown as debts too
+  const creditCardAccounts = accounts.filter(a=>a.type==='credit');
+
+  container.innerHTML =
+    '<div class="section-header">'
+    +'<div><div class="section-title">💳 Mes Dettes</div>'
+    +'<div style="font-size:12px;color:var(--text3);margin-top:3px">Total dû: <span style="color:var(--red);font-family:var(--mono);font-weight:700">'+fmt(totalOwed + creditCardAccounts.reduce((s,a)=>s+Math.abs(a.balance||0),0))+'</span>'+(totalMin?' &nbsp;·&nbsp; Min/mois: <span style="color:var(--orange);font-family:var(--mono)">'+fmt(totalMin)+'</span>':'')+'</div></div>'
+    +'<button class="btn-primary" id="add-debt-btn">+ Nouvelle dette</button>'
+    +'</div>'
+    +'<div class="tabs">'
+    +'<button class="tab active" id="tab-debts-active" onclick="window._switchDebtTab(\'active\')">Dettes actives ('+activeDebts.length+')</button>'
+    +'<button class="tab" id="tab-debts-cc" onclick="window._switchDebtTab(\'cc\')">Cartes de crédit ('+creditCardAccounts.length+')</button>'
+    +'<button class="tab" id="tab-debts-settled" onclick="window._switchDebtTab(\'settled\')">Remboursées ('+settledDebts.length+')</button>'
+    +'</div>'
+    // Active debts
+    +'<div id="debts-active-panel">'
+    +(activeDebts.length===0
+      ?'<div class="empty-state"><div class="empty-icon">💳</div><div class="empty-title">Aucune dette active</div><div class="empty-sub">Ajoutez vos dettes comptant, prêts et autres dettes</div></div>'
+      :'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px">'+activeDebts.map(renderDebtCard).join('')+'</div>'
+    )
+    +'</div>'
+    // Credit card accounts
+    +'<div id="debts-cc-panel" style="display:none">'
+    +(creditCardAccounts.length===0
+      ?'<div class="empty-state"><div class="empty-icon">💳</div><div class="empty-title">Aucune carte de crédit</div><div class="empty-sub">Ajoutez vos cartes dans la section Comptes (type: Carte de crédit)</div><button class="btn-primary" style="margin-top:12px" onclick="navigateTo(\'accounts\')">Gérer les comptes</button></div>'
+      :'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px">'
+        +creditCardAccounts.map(a=>{
+          const limit = a.creditLimit||0;
+          const balance = Math.abs(a.balance||0);
+          const available = limit > 0 ? limit - balance : 0;
+          const pct = limit > 0 ? Math.min(100,(balance/limit)*100) : 0;
+          const color = pct>=90?'var(--red)':pct>=70?'var(--orange)':'var(--green)';
+          return '<div class="debt-card credit-card">'
+            +'<div class="acc-type">💳 Carte de crédit</div>'
+            +'<div class="acc-name">'+a.name+'</div>'
+            +(a.institution?'<div style="font-size:11px;color:var(--text3);margin-bottom:6px">'+a.institution+'</div>':'')
+            +'<div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--red)">'+fmt(balance)+'</div>'
+            +'<div style="font-size:11px;color:var(--text3);margin-top:2px">Solde utilisé</div>'
+            +(limit>0?'<div style="font-size:11px;color:var(--text3)">Limite: '+fmt(limit)+' · Disponible: <span style="color:var(--green)">'+fmt(available)+'</span></div>':'')
+            +'<div style="margin:10px 0"><div class="progress-bar"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div><div style="font-size:11px;color:var(--text3);margin-top:3px">'+Math.round(pct)+'% utilisé</div></div>'
+            +'<div style="display:flex;gap:6px;margin-top:12px">'
+            +'<button class="btn-ghost" style="flex:1;padding:6px;font-size:11px" onclick="navigateTo(\'accounts\')">✎ Modifier</button>'
+            +'</div></div>';
+        }).join('')
+        +'</div>'
+    )
+    +'</div>'
+    // Settled debts
+    +'<div id="debts-settled-panel" style="display:none">'
+    +(settledDebts.length===0
+      ?'<div class="empty-state"><div class="empty-icon">✓</div><div class="empty-title">Aucune dette remboursée</div></div>'
+      :'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px">'+settledDebts.map(renderDebtCard).join('')+'</div>'
+    )
+    +'</div>';
+
+  window._switchDebtTab = (tab) => {
+    ['active','cc','settled'].forEach(t=>{
+      document.getElementById('tab-debts-'+t).classList.toggle('active',t===tab);
+      document.getElementById('debts-'+t+'-panel').style.display=t===tab?'':'none';
+    });
+  };
+
+  window._debtPay = (id) => {
+    const debt = debts.find(d=>d.id===id);
+    const bal = debt.currentBalance!==undefined?debt.currentBalance:(debt.amount||0);
+    openModal('Enregistrer un paiement',
+      '<p style="color:var(--text2);margin-bottom:14px">Dette: <strong>'+debt.name+'</strong><br>Solde actuel: <span style="color:var(--red);font-family:var(--mono)">'+fmt(bal)+'</span></p>'
+      +'<div class="form-group"><label>Montant payé ($) *</label><input id="pay-amount" type="number" step="0.01" placeholder="'+(debt.minimumPayment||'0.00')+'"/></div>'
+      +'<div class="form-group"><label>Date du paiement</label><input id="pay-date" type="date" value="'+today()+'"/></div>'
+      +'<div class="form-actions"><button class="btn-ghost" onclick="closeModal()">Annuler</button><button class="btn-primary" id="confirm-pay">Enregistrer</button></div>'
+    );
+    document.getElementById('confirm-pay').onclick = async () => {
+      const amount = parseFloat(document.getElementById('pay-amount').value);
+      if(!amount||amount<=0){toast('Montant invalide','error');return;}
+      const newBal = Math.max(0, bal - amount);
+      await updateDebt(id,{currentBalance:newBal,settled:newBal<=0,lastPaymentDate:Timestamp.fromDate(new Date(document.getElementById('pay-date').value))});
+      closeModal();
+      toast(newBal<=0?'🎉 Dette remboursée !':'Paiement enregistré ✓','success');
+      renderDebts(container);
+    };
+  };
+
+  const showDebtModal = (debt=null) => {
+    const bal = debt ? (debt.currentBalance!==undefined?debt.currentBalance:(debt.amount||0)) : '';
+    openModal(debt?'Modifier la dette':'Nouvelle dette',
+      '<div class="form-group"><label>Nom / Description *</label><input id="d-name" value="'+(debt?.name||'')+'" placeholder="Ex: Prêt auto, Dette à Marie, CIBC Visa..."/></div>'
+      +'<div class="form-row">'
+      +'<div class="form-group"><label>Type de dette *</label><select id="d-type">'
+      +'<option value="credit-card" '+(debt?.debtType==='credit-card'?'selected':'')+'>💳 Carte de crédit</option>'
+      +'<option value="cash-debt" '+(debt?.debtType==='cash-debt'?'selected':'')+'>💵 Dette comptant</option>'
+      +'<option value="loan" '+(debt?.debtType==='loan'?'selected':'')+'>🏛️ Prêt / Crédit</option>'
+      +'<option value="other-debt" '+(debt?.debtType==='other-debt'?'selected':'')+'>📋 Autre</option>'
+      +'</select></div>'
+      +'<div class="form-group"><label>Montant original ($) *</label><input id="d-original" type="number" step="0.01" value="'+(debt?.originalAmount||'')+'" placeholder="0.00"/></div>'
+      +'</div>'
+      +'<div class="form-row">'
+      +'<div class="form-group"><label>Solde actuel dû ($) *</label><input id="d-balance" type="number" step="0.01" value="'+bal+'" placeholder="0.00"/></div>'
+      +'<div class="form-group"><label>Paiement minimum ($)</label><input id="d-min" type="number" step="0.01" value="'+(debt?.minimumPayment||'')+'" placeholder="0.00"/></div>'
+      +'</div>'
+      +'<div class="form-row">'
+      +'<div class="form-group"><label>Taux d\'intérêt (%)</label><input id="d-rate" type="number" step="0.01" value="'+(debt?.interestRate||'')+'" placeholder="Ex: 19.99"/></div>'
+      +'<div class="form-group"><label>Prochain paiement</label><input id="d-next" type="date" value="'+(debt?.nextPaymentDate?(debt.nextPaymentDate.toDate?debt.nextPaymentDate.toDate().toISOString().split('T')[0]:debt.nextPaymentDate):'')+'"/></div>'
+      +'</div>'
+      +'<div class="form-group"><label>Créancier / Personne à qui je dois</label><input id="d-creditor" value="'+(debt?.creditor||'')+'" placeholder="Ex: Marie, Banque TD, Oncle Jean..."/></div>'
+      +'<div class="form-group"><label>Raison / Description de la dette</label><textarea id="d-reason">'+(debt?.reason||'')+'</textarea></div>'
+      +'<div class="form-actions"><button class="btn-ghost" onclick="closeModal()">Annuler</button><button class="btn-primary" id="save-debt">Enregistrer</button></div>'
+    );
+    document.getElementById('save-debt').onclick = async () => {
+      const name = document.getElementById('d-name').value.trim();
+      const original = parseFloat(document.getElementById('d-original').value);
+      const balance = parseFloat(document.getElementById('d-balance').value);
+      if(!name||!original||isNaN(balance)){toast('Remplissez les champs obligatoires','error');return;}
+      const nextVal = document.getElementById('d-next').value;
+      const data = {
+        name,
+        debtType: document.getElementById('d-type').value,
+        originalAmount: original,
+        currentBalance: balance,
+        amount: balance,
+        minimumPayment: parseFloat(document.getElementById('d-min').value)||0,
+        interestRate: parseFloat(document.getElementById('d-rate').value)||0,
+        nextPaymentDate: nextVal?Timestamp.fromDate(new Date(nextVal)):null,
+        creditor: document.getElementById('d-creditor').value.trim(),
+        reason: document.getElementById('d-reason').value.trim(),
+        settled: balance<=0,
+      };
+      if(debt) await updateDebt(debt.id,data); else await addDebt(data);
+      closeModal();
+      toast(debt?'Dette modifiée':'Dette ajoutée ✓','success');
+      renderDebts(container);
+    };
+  };
+
+  document.getElementById('add-debt-btn').onclick = () => showDebtModal();
+  window._editDebt = (id) => showDebtModal(debts.find(d=>d.id===id));
+  window._deleteDebt = (id, name) => {
+    openModal('Supprimer la dette',
+      '<p style="color:var(--text2);margin-bottom:18px">Supprimer <strong>'+name+'</strong> ?<br><span style="color:var(--red);font-size:12px">Action irréversible.</span></p>'
+      +'<div class="form-actions"><button class="btn-ghost" onclick="closeModal()">Annuler</button><button class="btn-danger" id="confirm-del">Supprimer</button></div>'
+    );
+    document.getElementById('confirm-del').onclick = async () => {
+      await deleteDebt(id);
+      closeModal();
+      toast('Supprimée','success');
+      renderDebts(container);
+    };
+  };
+}
+
 const PAGES={
   dashboard:{title:'Tableau de bord',render:renderDashboard},
   accounts:{title:'Comptes',render:renderAccounts},
+  debts:{title:'Dettes',render:renderDebts},
   transactions:{title:'Transactions',render:renderTransactions},
   budgets:{title:'Budgets',render:renderBudgets},
   categories:{title:'Catégories',render:renderCategories},
