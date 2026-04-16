@@ -272,6 +272,16 @@ textarea{resize:vertical;min-height:80px}.form-row{display:grid;grid-template-co
 
 /* Sidebar overlay (tablet/mobile) */
 #sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:299;backdrop-filter:blur(2px)}
+
+/* ── SCHEDULED TRANSFERS ─────────────────────────────── */
+.sched-item{display:flex;align-items:center;gap:14px;padding:13px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius2);margin-bottom:10px;transition:.2s}
+.sched-item:hover{border-color:var(--border2)}
+.sched-icon{width:38px;height:38px;border-radius:10px;background:rgba(79,209,197,.12);border:1px solid rgba(79,209,197,.25);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+.sched-info{flex:1;min-width:0}
+.sched-name{font-size:13px;font-weight:600;margin-bottom:2px}
+.sched-sub{font-size:11px;color:var(--text3)}
+.sched-amount{font-family:var(--mono);font-weight:700;font-size:15px;color:var(--accent);flex-shrink:0}
+.sched-badge{font-size:10px;padding:2px 7px;border-radius:8px;font-weight:600;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -312,6 +322,7 @@ textarea{resize:vertical;min-height:80px}.form-row{display:grid;grid-template-co
       <a href="#" class="nav-item" data-page="accounts"><span class="nav-icon">◎</span> Comptes</a>
       <a href="#" class="nav-item" data-page="debts"><span class="nav-icon">💳</span> Dettes</a>
       <a href="#" class="nav-item" data-page="transactions"><span class="nav-icon">⇄</span> Transactions</a>
+      <a href="#" class="nav-item" data-page="scheduled"><span class="nav-icon">🔁</span> Virements planifiés</a>
       <a href="#" class="nav-item" data-page="budgets"><span class="nav-icon">◉</span> Budgets</a>
       <div class="nav-label">Organisation</div>
       <a href="#" class="nav-item" data-page="categories"><span class="nav-icon">⊞</span> Catégories</a>
@@ -482,6 +493,62 @@ async function addTransfer(data) {
   await addTransaction({...data,type:'income',accountId:data.toAccountId,description:null,reason:'Transfert ← '+data.fromAccountName,category:'Transfert'});
 }
 
+
+// ── SCHEDULED TRANSFERS DB ─────────────────────────────
+async function getScheduledTransfers() { const s=await getDocs(col('scheduledTransfers')); return s.docs.map(d=>({id:d.id,...d.data()})); }
+async function addScheduledTransfer(data) { return addDoc(col('scheduledTransfers'),{...data,createdAt:Timestamp.now()}); }
+async function updateScheduledTransfer(id,data) { return updateDoc(dref('scheduledTransfers',id),data); }
+async function deleteScheduledTransfer(id) { return deleteDoc(dref('scheduledTransfers',id)); }
+
+// Run scheduled transfers on login — executes any due transfers
+async function checkScheduledTransfers() {
+  const [transfers, accounts] = await Promise.all([getScheduledTransfers(), getAccounts()]);
+  const todayStr = new Date().toISOString().split('T')[0];
+  for (const t of transfers) {
+    if (!t.active) continue;
+    const nextDate = t.nextDate?.toDate ? t.nextDate.toDate() : new Date(t.nextDate);
+    const nextStr = nextDate.toISOString().split('T')[0];
+    if (nextStr > todayStr) continue;
+    // Execute the transfer
+    const fromAcc = accounts.find(a=>a.id===t.fromAccountId);
+    const toAcc   = accounts.find(a=>a.id===t.toAccountId);
+    if (!fromAcc || !toAcc) continue;
+    await addTransfer({
+      fromAccountId:t.fromAccountId, toAccountId:t.toAccountId,
+      fromAccountName:fromAcc.name,  toAccountName:toAcc.name,
+      amount:t.amount,
+      date:Timestamp.now(),
+      reason:(t.label||'Transfert planifié'),
+    });
+    // Compute next execution date
+    let next = new Date(nextDate);
+    if (t.frequency==='weekly')      next.setDate(next.getDate()+7);
+    else if (t.frequency==='biweekly') next.setDate(next.getDate()+14);
+    else if (t.frequency==='monthly')  next.setMonth(next.getMonth()+1);
+    else if (t.frequency==='quarterly')next.setMonth(next.getMonth()+3);
+    else { // once — deactivate
+      await updateScheduledTransfer(t.id,{active:false,lastExecuted:Timestamp.now()});
+      _notifyTransfer(t.label||'Transfert', fromAcc.name, toAcc.name, t.amount);
+      continue;
+    }
+    await updateScheduledTransfer(t.id,{nextDate:Timestamp.fromDate(next),lastExecuted:Timestamp.now()});
+    _notifyTransfer(t.label||'Transfert', fromAcc.name, toAcc.name, t.amount);
+  }
+}
+
+function _notifyTransfer(label, from, to, amount) {
+  const el = document.createElement('div');
+  el.className = 'toast success';
+  el.innerHTML = '⇄ <strong>'+label+'</strong> exécuté: '+fmt(amount)+' de '+from+' → '+to;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(()=>el.remove(), 6000);
+  if (Notification.permission==='granted') {
+    new Notification('FinanceFlow — Virement automatique', {
+      body: label+': '+fmt(amount)+' de '+from+' vers '+to,
+    });
+  }
+}
+
 // Persons persistence
 async function getPersons() { const s=await getDocs(col('persons')); return s.docs.map(d=>({id:d.id,...d.data()})); }
 async function savePerson(name) {
@@ -587,6 +654,14 @@ async function buildReminders() {
     const d=daysUntil(b.dueDate);
     if(d!==null&&d<=14) items.push({icon:b.icon||'📄',type:'bill',text:'Facture: '+b.name,sub:fmt(b.amount)+(b.autoPay?' · Auto':' '),dateLabel:d<0?'En retard '+Math.abs(d)+'j':d===0?"Aujourd'hui":'Dans '+d+'j',urgent:d<0,soon:d<=7&&d>=0,days:d});
   });
+  // Scheduled transfers due soon
+  try {
+    const scheds = await getScheduledTransfers();
+    scheds.filter(s=>s.active!==false&&s.nextDate).forEach(s=>{
+      const d=daysUntil(s.nextDate);
+      if(d!==null&&d<=7) items.push({icon:'🔁',type:'scheduled',text:'Virement: '+(s.label||'Virement planifié'),sub:fmt(s.amount),dateLabel:d<0?'En retard '+Math.abs(d)+'j':d===0?"Aujourd'hui":'Dans '+d+'j',urgent:d<0,soon:d<=3&&d>=0,days:d});
+    });
+  } catch(e){}
   planned.filter(p=>p.priority==='high'&&!p.purchased).forEach(p=>{
     items.push({icon:'🛒',type:'planned',text:'Dépense planifiée: '+p.name,sub:fmt(p.estimatedPrice),dateLabel:p.targetDate?fmtDate(p.targetDate):'Haute priorité',urgent:false,soon:true,days:999});
   });
@@ -730,7 +805,7 @@ async function renderTransactions(container) {
     const total=txList.reduce((s,t)=>s+(t.type==='income'?t.amount:-t.amount),0);
     return'<div style="display:flex;justify-content:flex-end;padding:8px 14px;font-size:13px;color:var(--text3)">Solde: <span class="'+(total>=0?'amount-pos':'amount-neg')+'" style="margin-left:8px">'+fmt(total)+'</span></div>'+
     '<table><thead><tr><th>Date</th><th>Raison / Détail</th><th>Catégorie</th><th>Personne</th><th>Compte</th><th>Montant</th><th></th></tr></thead><tbody>'+
-    txList.map(tx=>{const acc=allAccounts.find(a=>a.id===tx.accountId);return'<tr><td style="font-size:12px;color:var(--text3);white-space:nowrap">'+fmtDate(tx.date)+'</td><td><div style="font-weight:500">'+(tx.reason||'—')+'</div></td><td><span class="badge badge-blue">'+(tx.category||'Autre')+'</span></td><td style="color:var(--text2)">'+(tx.person||'—')+'</td><td style="font-size:12px;color:var(--text3)">'+(acc?.name||'—')+(acc?.type==='credit'?' 💳':'')+'</td><td class="'+(tx.type==='income'?'amount-pos':'amount-neg')+'" style="white-space:nowrap">'+(tx.type==='income'?'+':'-')+fmt(tx.amount)+'</td><td><button class="btn-danger" style="padding:4px 8px;font-size:11px" onclick="window._delTx(\''+tx.id+'\')">✕</button></td></tr>';}).join('')+
+    txList.map(tx=>{const acc=allAccounts.find(a=>a.id===tx.accountId);return'<tr><td style="font-size:12px;color:var(--text3);white-space:nowrap">'+fmtDate(tx.date)+'</td><td><div style="font-weight:500">'+(tx.reason||'—')+'</div></td><td><span class="badge badge-blue">'+(tx.category||'Autre')+'</span></td><td style="color:var(--text2)">'+(tx.person||'—')+'</td><td style="font-size:12px;color:var(--text3)">'+(acc?.name||'—')+(acc?.type==='credit'?' 💳':'')+'</td><td class="'+(tx.type==='income'?'amount-pos':'amount-neg')+'" style="white-space:nowrap">'+(tx.type==='income'?'+':'-')+fmt(tx.amount)+'</td><td style="white-space:nowrap"><button class="btn-ghost" style="padding:4px 7px;font-size:11px;margin-right:4px" onclick="window._editTx(\''+tx.id+'\')">✎</button><button class="btn-danger" style="padding:4px 7px;font-size:11px" onclick="window._delTx(\''+tx.id+'\')">✕</button></td></tr>';}).join('')+
     '</tbody></table>';
   };
 
@@ -764,6 +839,88 @@ async function renderTransactions(container) {
     const tx=allTx.find(t=>t.id===id);
     openModal('Supprimer','<p style="color:var(--text2);margin-bottom:18px">Supprimer transaction de <strong>'+fmt(tx?.amount)+'</strong> ?</p><div class="form-actions"><button class="btn-ghost" onclick="closeModal()">Annuler</button><button class="btn-danger" id="confirm-del">Supprimer</button></div>');
     document.getElementById('confirm-del').onclick=async()=>{await deleteTransaction(id,tx);closeModal();toast('Transaction supprimée','success');allTx=allTx.filter(t=>t.id!==id);document.getElementById('tx-table').innerHTML=renderTable(allTx);};
+  };
+
+  window._editTx=(id)=>{
+    const tx=allTx.find(t=>t.id===id);
+    if(!tx)return;
+    const creditAccounts=allAccounts.filter(a=>a.type==='credit');
+    const regularAccounts=allAccounts.filter(a=>a.type!=='credit');
+    const accountOptions='<option value="">Sélectionner...</option>'+
+      (regularAccounts.length?'<optgroup label="Comptes">'+regularAccounts.map(a=>'<option value="'+a.id+'" '+(tx.accountId===a.id?'selected':'')+'>'+a.name+'</option>').join('')+'</optgroup>':'')+
+      (creditAccounts.length?'<optgroup label="Cartes de crédit">'+creditAccounts.map(a=>'<option value="'+a.id+'" '+(tx.accountId===a.id?'selected':'')+'>'+a.name+' 💳</option>').join('')+'</optgroup>':'');
+    const txDate=tx.date?.toDate?tx.date.toDate().toISOString().split('T')[0]:(tx.date||today());
+    openModal('Modifier la transaction',
+      '<div class="tabs">'
+      +'<button class="tab '+(tx.type==='expense'?'active':'')+'" id="edit-tab-expense" onclick="window._switchEditTab(&apos;expense&apos;)">💸 Dépense</button>'
+      +'<button class="tab '+(tx.type==='income'?'active':'')+'" id="edit-tab-income" onclick="window._switchEditTab(&apos;income&apos;)">💰 Revenu</button>'
+      +'</div>'
+      +'<input type="hidden" id="edit-tx-type" value="'+tx.type+'"/>'
+      +'<div class="form-row">'
+      +'<div class="form-group"><label>Montant ($) *</label><input id="edit-tx-amount" type="number" step="0.01" value="'+tx.amount+'"/></div>'
+      +'<div class="form-group"><label>Date *</label><input id="edit-tx-date" type="date" value="'+txDate+'"/></div>'
+      +'</div>'
+      +'<div class="form-group"><label>Raison / Détail *</label><input id="edit-tx-reason" value="'+(tx.reason||'')+'" placeholder="Ex: épicerie, loyer..."/></div>'
+      +'<div class="form-row">'
+      +'<div class="form-group"><label>Personne</label>'
+      +'<select id="edit-tx-person"><option value="">— Aucune —</option>'+allPersons.map(p=>'<option value="'+p.name+'" '+(tx.person===p.name?'selected':'')+'>'+p.name+'</option>').join('')+'</select>'
+      +'</div>'
+      +'<div class="form-group"><label>Catégorie</label>'
+      +'<select id="edit-tx-category"><option value="">—</option>'+allCats.map(c=>'<option value="'+c.name+'" '+(tx.category===c.name?'selected':'')+'>'+( c.icon||'')+' '+c.name+'</option>').join('')+'<option value="Autre" '+(tx.category==='Autre'?'selected':'')+'>Autre</option></select>'
+      +'</div></div>'
+      +'<div class="form-group"><label id="edit-account-lbl">'+(tx.type==='income'?'Compte (dépôt)':'Compte')+'</label>'
+      +'<select id="edit-tx-account">'+accountOptions+'</select>'
+      +'</div>'
+      +'<div class="form-group" id="edit-source-grp" style="'+(tx.type==='income'?'':'display:none')+'">'
+      +'<label>Source du revenu</label><input id="edit-tx-source" value="'+(tx.source||'')+'" placeholder="Ex: Emploi, Freelance..."/>'
+      +'</div>'
+      +'<div class="form-actions"><button class="btn-ghost" onclick="closeModal()">Annuler</button><button class="btn-primary" id="save-edit-tx">Enregistrer</button></div>'
+    );
+    window._switchEditTab=(t)=>{
+      document.getElementById('edit-tab-expense').classList.toggle('active',t==='expense');
+      document.getElementById('edit-tab-income').classList.toggle('active',t==='income');
+      document.getElementById('edit-tx-type').value=t;
+      document.getElementById('edit-source-grp').style.display=t==='income'?'':'none';
+      document.getElementById('edit-account-lbl').textContent=t==='income'?'Compte (dépôt)':'Compte';
+    };
+    document.getElementById('save-edit-tx').onclick=async()=>{
+      const newAmount=parseFloat(document.getElementById('edit-tx-amount').value);
+      const newReason=document.getElementById('edit-tx-reason').value.trim();
+      if(!newAmount||newAmount<=0){toast('Montant invalide','error');return;}
+      if(!newReason){toast('La raison est obligatoire','error');return;}
+      const newType=document.getElementById('edit-tx-type').value;
+      const newAccountId=document.getElementById('edit-tx-account').value;
+      // Reverse old account balance effect, then apply new
+      if(tx.accountId){
+        const oldAcc=await getDoc(dref('accounts',tx.accountId));
+        if(oldAcc.exists()){
+          const delta=tx.type==='income'?-tx.amount:tx.amount;
+          await updateDoc(dref('accounts',tx.accountId),{balance:(oldAcc.data().balance||0)+delta});
+        }
+      }
+      const updData={
+        type:newType,
+        amount:newAmount,
+        date:Timestamp.fromDate(new Date(document.getElementById('edit-tx-date').value)),
+        reason:newReason,
+        person:document.getElementById('edit-tx-person').value,
+        category:document.getElementById('edit-tx-category').value||'Autre',
+        accountId:newAccountId,
+        source:document.getElementById('edit-tx-source')?.value.trim()||tx.source||'',
+      };
+      await updateDoc(dref('transactions',id),updData);
+      // Apply new account balance effect
+      if(newAccountId){
+        const newAcc=await getDoc(dref('accounts',newAccountId));
+        if(newAcc.exists()){
+          const delta=newType==='income'?newAmount:-newAmount;
+          await updateDoc(dref('accounts',newAccountId),{balance:(newAcc.data().balance||0)+delta});
+        }
+      }
+      closeModal();toast('Transaction modifiée ✓','success');
+      allTx=await getTransactions();
+      document.getElementById('tx-table').innerHTML=renderTable(allTx);
+    };
   };
 
   const showTxModal=()=>{
@@ -1631,12 +1788,163 @@ async function renderStats(container) {
     + plannedHTML;
 }
 
+
+// ── VIREMENTS PLANIFIÉS PAGE ───────────────────────────
+async function renderScheduled(container) {
+  const [transfers, accounts] = await Promise.all([getScheduledTransfers(), getAccounts()]);
+  const active   = transfers.filter(t=>t.active!==false);
+  const inactive = transfers.filter(t=>t.active===false);
+  const freqLabel = {once:'Une seule fois', weekly:'Chaque semaine', biweekly:'Toutes les 2 semaines', monthly:'Chaque mois', quarterly:'Chaque trimestre'};
+  const freqIcon  = {once:'📅', weekly:'7️⃣', biweekly:'2️⃣', monthly:'📆', quarterly:'📅'};
+
+  const renderItem = (t) => {
+    const from = accounts.find(a=>a.id===t.fromAccountId);
+    const to   = accounts.find(a=>a.id===t.toAccountId);
+    const days = t.nextDate ? daysUntil(t.nextDate) : null;
+    let badge = '', badgeColor = 'badge-gray';
+    if (!t.active) { badge='Terminé'; badgeColor='badge-gray'; }
+    else if (days===null) { badge='—'; }
+    else if (days<0) { badge='En retard '+Math.abs(days)+'j'; badgeColor='badge-red'; }
+    else if (days===0) { badge="Aujourd'hui"; badgeColor='badge-orange'; }
+    else { badge='Dans '+days+'j'; badgeColor=days<=7?'badge-orange':'badge-blue'; }
+
+    return '<div class="sched-item">'
+      +'<div class="sched-icon">🔁</div>'
+      +'<div class="sched-info">'
+      +'<div class="sched-name">'+(t.label||'Virement planifié')+'</div>'
+      +'<div class="sched-sub">'+(from?.name||'?')+' → '+(to?.name||'?')
+      +(t.frequency?' · '+(freqIcon[t.frequency]||'')+'  '+(freqLabel[t.frequency]||t.frequency):'')
+      +(t.nextDate&&t.active?' · Prochain: '+fmtDate(t.nextDate):'')
+      +(t.lastExecuted?' · Dernier: '+fmtDate(t.lastExecuted):'')
+      +'</div>'
+      +(t.note?'<div style="font-size:11px;color:var(--text2);margin-top:2px">'+t.note+'</div>':'')
+      +'</div>'
+      +'<span class="sched-amount">'+fmt(t.amount)+'</span>'
+      +'<span class="badge '+badgeColor+' sched-badge">'+badge+'</span>'
+      +'<div style="display:flex;flex-direction:column;gap:4px;margin-left:6px">'
+      +(t.active!==false?'<button class="btn-primary" style="padding:4px 9px;font-size:11px" onclick="window._runNow(\''+t.id+'\')">▶ Exécuter</button>':'')
+      +'<button class="btn-ghost" style="padding:4px 9px;font-size:11px" onclick="window._editSched(\''+t.id+'\')">✎</button>'
+      +'<button class="btn-danger" style="padding:4px 8px;font-size:11px" onclick="window._deleteSched(\''+t.id+'\')">✕</button>'
+      +'</div></div>';
+  };
+
+  container.innerHTML =
+    '<div class="section-header">'
+    +'<div><div class="section-title">🔁 Virements planifiés</div>'
+    +'<div style="font-size:12px;color:var(--text3);margin-top:3px">'+active.length+' actif(s) — exécutés automatiquement à la date prévue</div></div>'
+    +'<button class="btn-primary" id="add-sched-btn">+ Nouveau virement</button>'
+    +'</div>'
+    +'<div class="tabs">'
+    +'<button class="tab active" id="tab-sched-active" onclick="window._switchSchedTab(\'active\')">Actifs ('+active.length+')</button>'
+    +'<button class="tab" id="tab-sched-done" onclick="window._switchSchedTab(\'done\')">Terminés ('+inactive.length+')</button>'
+    +'</div>'
+    +'<div id="sched-panel-active">'
+    +(active.length===0
+      ?'<div class="empty-state"><div class="empty-icon">🔁</div><div class="empty-title">Aucun virement planifié</div><div class="empty-sub">Automatisez vos virements récurrents entre comptes</div></div>'
+      :active.map(renderItem).join('')
+    )+'</div>'
+    +'<div id="sched-panel-done" style="display:none">'
+    +(inactive.length===0
+      ?'<div class="empty-state"><div class="empty-icon">✓</div><div class="empty-title">Aucun virement terminé</div></div>'
+      :inactive.map(renderItem).join('')
+    )+'</div>';
+
+  window._switchSchedTab = (tab) => {
+    ['active','done'].forEach(t=>{
+      document.getElementById('tab-sched-'+t).classList.toggle('active',t===tab);
+      document.getElementById('sched-panel-'+t).style.display=t===tab?'':'none';
+    });
+  };
+
+  window._runNow = async (id) => {
+    const t = transfers.find(x=>x.id===id);
+    const fromAcc = accounts.find(a=>a.id===t.fromAccountId);
+    const toAcc   = accounts.find(a=>a.id===t.toAccountId);
+    if(!fromAcc||!toAcc){toast('Comptes introuvables','error');return;}
+    await addTransfer({fromAccountId:t.fromAccountId,toAccountId:t.toAccountId,fromAccountName:fromAcc.name,toAccountName:toAcc.name,amount:t.amount,date:Timestamp.now(),reason:t.label||'Virement planifié'});
+    if(t.frequency==='once'){
+      await updateScheduledTransfer(id,{active:false,lastExecuted:Timestamp.now()});
+    } else {
+      let next = t.nextDate?.toDate ? new Date(t.nextDate.toDate()) : new Date(t.nextDate);
+      if(t.frequency==='weekly') next.setDate(next.getDate()+7);
+      else if(t.frequency==='biweekly') next.setDate(next.getDate()+14);
+      else if(t.frequency==='monthly') next.setMonth(next.getMonth()+1);
+      else if(t.frequency==='quarterly') next.setMonth(next.getMonth()+3);
+      await updateScheduledTransfer(id,{nextDate:Timestamp.fromDate(next),lastExecuted:Timestamp.now()});
+    }
+    _notifyTransfer(t.label||'Virement',fromAcc.name,toAcc.name,t.amount);
+    toast('Virement exécuté ✓','success');
+    renderScheduled(container);
+  };
+
+  window._deleteSched = (id) => {
+    openModal('Supprimer le virement',
+      '<p style="color:var(--text2);margin-bottom:18px">Supprimer ce virement planifié ? Les virements déjà effectués ne seront pas annulés.</p>'
+      +'<div class="form-actions"><button class="btn-ghost" onclick="closeModal()">Annuler</button><button class="btn-danger" id="confirm-del">Supprimer</button></div>'
+    );
+    document.getElementById('confirm-del').onclick = async()=>{await deleteScheduledTransfer(id);closeModal();toast('Supprimé','success');renderScheduled(container);};
+  };
+
+  const showSchedModal = (t=null) => {
+    const accOpts = '<option value="">Sélectionner...</option>'+accounts.map(a=>'<option value="'+a.id+'" '+(t?.fromAccountId===a.id?'selected':'')+'>'+a.name+'</option>').join('');
+    const accOpts2 = '<option value="">Sélectionner...</option>'+accounts.map(a=>'<option value="'+a.id+'" '+(t?.toAccountId===a.id?'selected':'')+'>'+a.name+'</option>').join('');
+    openModal(t?'Modifier le virement':'Nouveau virement planifié',
+      '<div class="form-group"><label>Nom / Description *</label><input id="sc-label" value="'+(t?.label||'')+'" placeholder="Ex: Épargne mensuelle, Remboursement loyer..."/></div>'
+      +'<div class="form-row">'
+      +'<div class="form-group"><label>De (compte source) *</label><select id="sc-from">'+accOpts+'</select></div>'
+      +'<div class="form-group"><label>Vers (compte destination) *</label><select id="sc-to">'+accOpts2+'</select></div>'
+      +'</div>'
+      +'<div class="form-row">'
+      +'<div class="form-group"><label>Montant ($) *</label><input id="sc-amount" type="number" step="0.01" value="'+(t?.amount||'')+'" placeholder="0.00"/></div>'
+      +'<div class="form-group"><label>Date de début *</label><input id="sc-date" type="date" value="'+(t?.nextDate?(t.nextDate.toDate?t.nextDate.toDate().toISOString().split("T")[0]:t.nextDate):today())+'"/></div>'
+      +'</div>'
+      +'<div class="form-group"><label>Fréquence *</label><select id="sc-freq">'
+      +'<option value="once" '+(t?.frequency==="once"?"selected":"")+'>📅 Une seule fois</option>'
+      +'<option value="weekly" '+(t?.frequency==="weekly"?"selected":"")+'>7️⃣ Chaque semaine</option>'
+      +'<option value="biweekly" '+(t?.frequency==="biweekly"?"selected":"")+'>2️⃣ Toutes les 2 semaines</option>'
+      +'<option value="monthly" '+((!t||t?.frequency==="monthly")?"selected":"")+'>📆 Chaque mois</option>'
+      +'<option value="quarterly" '+(t?.frequency==="quarterly"?"selected":"")+'>📅 Chaque trimestre</option>'
+      +'</select></div>'
+      +'<div class="form-group"><label>Note (optionnelle)</label><input id="sc-note" value="'+(t?.note||'')+'" placeholder="Ex: pour l\'épargne d\'urgence..."/></div>'
+      +'<div style="background:rgba(79,209,197,.07);border:1px solid rgba(79,209,197,.2);border-radius:10px;padding:12px;margin-bottom:16px;font-size:12px;color:var(--text2)">'
+      +'🔔 Une notification sera envoyée chaque fois que ce virement est exécuté automatiquement.'
+      +'</div>'
+      +'<div class="form-actions"><button class="btn-ghost" onclick="closeModal()">Annuler</button><button class="btn-primary" id="save-sched">Enregistrer</button></div>'
+    );
+    document.getElementById('save-sched').onclick = async () => {
+      const label  = document.getElementById('sc-label').value.trim();
+      const fromId = document.getElementById('sc-from').value;
+      const toId   = document.getElementById('sc-to').value;
+      const amount = parseFloat(document.getElementById('sc-amount').value);
+      const dateVal= document.getElementById('sc-date').value;
+      const freq   = document.getElementById('sc-freq').value;
+      if(!label||!fromId||!toId||!amount||!dateVal){toast('Remplissez tous les champs obligatoires','error');return;}
+      if(fromId===toId){toast('Les deux comptes doivent être différents','error');return;}
+      const data = {
+        label, fromAccountId:fromId, toAccountId:toId,
+        amount, frequency:freq,
+        nextDate:Timestamp.fromDate(new Date(dateVal)),
+        note:document.getElementById('sc-note').value.trim(),
+        active:true,
+      };
+      if(t) await updateScheduledTransfer(t.id,data); else await addScheduledTransfer(data);
+      closeModal();
+      toast(t?'Virement modifié':'Virement planifié ✓','success');
+      renderScheduled(container);
+    };
+  };
+
+  document.getElementById('add-sched-btn').onclick = () => showSchedModal();
+  window._editSched = (id) => showSchedModal(transfers.find(x=>x.id===id));
+}
+
 const PAGES={
   dashboard:{title:'Tableau de bord',render:renderDashboard},
   stats:{title:'Statistiques',render:renderStats},
   accounts:{title:'Comptes',render:renderAccounts},
   debts:{title:'Dettes',render:renderDebts},
   transactions:{title:'Transactions',render:renderTransactions},
+  scheduled:{title:'Virements planifiés',render:renderScheduled},
   budgets:{title:'Budgets',render:renderBudgets},
   categories:{title:'Catégories',render:renderCategories},
   bills:{title:'Factures',render:renderBills},
@@ -1689,6 +1997,7 @@ onAuthStateChanged(auth,user=>{
     navigateTo('dashboard');
     // Check auto-pay bills on login
     checkAutoPay().catch(console.error);
+    checkScheduledTransfers().catch(console.error);
     // Load reminder badge
     renderReminderPanel().catch(console.error);
     // Request notification permission
