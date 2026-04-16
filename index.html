@@ -794,7 +794,7 @@ async function renderTransactions(container) {
         </div>
         <div class="form-group"><label>Catégorie</label><select id="tx-category"><option value="">Sélectionner...</option>${allCats.map(c=>'<option value="'+c.name+'">'+(c.icon||'')+' '+c.name+'</option>').join('')}<option value="Autre">Autre</option></select></div>
       </div>
-      <div class="form-group"><label>Compte <span class="required" id="tx-account-required">*</span></label>
+      <div class="form-group"><label><span id="tx-account-label">Compte</span></label>
         <select id="tx-account">${accountOptions}</select>
         <div style="font-size:11px;color:var(--text3);margin-top:4px" id="tx-account-hint">Si vous utilisez une carte de crédit, le montant sera ajouté à sa dette.</div>
       </div>
@@ -812,8 +812,18 @@ async function renderTransactions(container) {
       document.getElementById('tab-income').classList.toggle('active',t==='income');
       document.getElementById('tx-type-val').value=t;
       document.getElementById('tx-source-group').style.display=t==='income'?'':'none';
-      document.getElementById('tx-account').closest('.form-group').style.display=t==='income'?'none':'';
-      document.getElementById('tx-account-hint').style.display=t==='income'?'none':'';
+      // Account field visible for BOTH expense and income
+      document.getElementById('tx-account').closest('.form-group').style.display='';
+      // Change account label and hint based on type
+      const lbl = document.getElementById('tx-account-label');
+      const hint = document.getElementById('tx-account-hint');
+      if(t==='income'){
+        if(lbl) lbl.textContent='Déposer dans le compte';
+        if(hint) hint.textContent='Choisissez le compte où déposer ce revenu (optionnel).';
+      } else {
+        if(lbl) lbl.textContent='Compte';
+        if(hint) hint.textContent='Si vous utilisez une carte de crédit, le montant sera ajouté à sa dette.';
+      }
     };
 
     document.getElementById('save-tx').onclick=async()=>{
@@ -839,7 +849,7 @@ async function renderTransactions(container) {
         reason,
         person,
         category:document.getElementById('tx-category').value||'Autre',
-        accountId:txType==='income'?'':accountId,
+        accountId:accountId,
         source:document.getElementById('tx-source')?.value.trim()||'',
       };
 
