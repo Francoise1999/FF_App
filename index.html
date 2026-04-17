@@ -465,7 +465,7 @@ async function checkBudgetAlert(category) {
   const now = new Date();
   const monthTx = transactions.filter(tx=>{
     const d=tx.date?.toDate?tx.date.toDate():new Date(tx.date);
-    return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear()&&tx.type==='expense'&&tx.category===category;
+    return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear()&&tx.type==='expense'&&tx.category===category&&tx.category!=='Virement'&&tx.category!=='Transfert';
   });
   const spent = monthTx.reduce((s,t)=>s+t.amount,0);
   const pct = budget.amount>0?(spent/budget.amount)*100:0;
@@ -489,8 +489,15 @@ async function deleteTransaction(id,data) {
   return deleteDoc(dref('transactions',id));
 }
 async function addTransfer(data) {
-  await addTransaction({...data,type:'expense',accountId:data.fromAccountId,description:null,reason:'Transfert → '+data.toAccountName,category:'Transfert'});
-  await addTransaction({...data,type:'income',accountId:data.toAccountId,description:null,reason:'Transfert ← '+data.fromAccountName,category:'Transfert'});
+  // Use type:'transfer' so these are NEVER counted as income or expense in stats
+  // Handle balance update manually (addTransaction only handles income/expense delta)
+  const fromRef = await addDoc(col('transactions'),{...data,type:'transfer',accountId:data.fromAccountId,description:null,reason:'Virement → '+data.toAccountName,category:'Virement',createdAt:Timestamp.now()});
+  const toRef   = await addDoc(col('transactions'),{...data,type:'transfer',accountId:data.toAccountId, description:null,reason:'Virement ← '+data.fromAccountName,category:'Virement',createdAt:Timestamp.now()});
+  // Update balances: debit from, credit to
+  const fromAcc = await getDoc(dref('accounts',data.fromAccountId));
+  const toAcc   = await getDoc(dref('accounts',data.toAccountId));
+  if(fromAcc.exists()) await updateDoc(dref('accounts',data.fromAccountId),{balance:(fromAcc.data().balance||0)-data.amount});
+  if(toAcc.exists())   await updateDoc(dref('accounts',data.toAccountId),  {balance:(toAcc.data().balance||0)+data.amount});
 }
 
 
@@ -599,6 +606,12 @@ function toast(msg,type='info',duration=3500){
 function fmt(a){return new Intl.NumberFormat('fr-CA',{style:'currency',currency:'CAD'}).format(a||0);}
 function fmtDate(ts){if(!ts)return'—';const d=ts.toDate?ts.toDate():new Date(ts);return d.toLocaleDateString('fr-CA',{year:'numeric',month:'short',day:'numeric'});}
 function today(){return new Date().toISOString().split('T')[0];}
+function parseLocalDate(str) {
+  // Parse 'YYYY-MM-DD' as LOCAL time, not UTC (avoids timezone shift)
+  if (!str) return new Date();
+  const [y,m,d] = str.split('-').map(Number);
+  return new Date(y, m-1, d);
+}
 function daysUntil(ts){if(!ts)return null;const d=ts.toDate?ts.toDate():new Date(ts);return Math.ceil((d-new Date())/86400000);}
 
 const typeIcons={checking:'🏦',savings:'💰',credit:'💳',cash:'💵',investment:'📈'};
@@ -705,8 +718,8 @@ async function renderDashboard(container) {
   const [accounts, transactions, budgets] = await Promise.all([getAccounts(), getTransactions({limit:60}), getBudgets()]);
   const now = new Date();
   const monthTx = transactions.filter(tx=>{const d=tx.date?.toDate?tx.date.toDate():new Date(tx.date);return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();});
-  const monthIncome = monthTx.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
-  const monthExpense = monthTx.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+  const monthIncome = monthTx.filter(t=>t.type==='income'&&t.category!=='Virement').reduce((s,t)=>s+t.amount,0);
+  const monthExpense = monthTx.filter(t=>t.type==='expense'&&t.category!=='Virement'&&t.category!=='Transfert').reduce((s,t)=>s+t.amount,0);
   const totalDebt = accounts.filter(a=>a.type==='credit').reduce((s,a)=>s+Math.abs(a.balance||0),0);
   const byCat={};
   monthTx.filter(t=>t.type==='expense').forEach(t=>{byCat[t.category||'Autre']=(byCat[t.category||'Autre']||0)+t.amount;});
@@ -901,7 +914,7 @@ async function renderTransactions(container) {
       const updData={
         type:newType,
         amount:newAmount,
-        date:Timestamp.fromDate(new Date(document.getElementById('edit-tx-date').value)),
+        date:Timestamp.fromDate(parseLocalDate(document.getElementById('edit-tx-date').value)),
         reason:newReason,
         person:document.getElementById('edit-tx-person').value,
         category:document.getElementById('edit-tx-category').value||'Autre',
@@ -1002,7 +1015,7 @@ async function renderTransactions(container) {
 
       const data={
         type:txType,amount,
-        date:Timestamp.fromDate(new Date(document.getElementById('tx-date').value)),
+        date:Timestamp.fromDate(parseLocalDate(document.getElementById('tx-date').value)),
         reason,
         person,
         category:document.getElementById('tx-category').value||'Autre',
@@ -1047,7 +1060,7 @@ async function renderTransactions(container) {
       if(!fromId||!toId||fromId===toId){toast('Sélectionnez deux comptes différents','error');return;}
       if(!amount||amount<=0){toast('Montant invalide','error');return;}
       const fromAcc=allAccounts.find(a=>a.id===fromId),toAcc=allAccounts.find(a=>a.id===toId);
-      await addTransfer({fromAccountId:fromId,toAccountId:toId,fromAccountName:fromAcc?.name,toAccountName:toAcc?.name,amount,date:Timestamp.fromDate(new Date(document.getElementById('tf-date').value)),reason:document.getElementById('tf-note').value.trim()});
+      await addTransfer({fromAccountId:fromId,toAccountId:toId,fromAccountName:fromAcc?.name,toAccountName:toAcc?.name,amount,date:Timestamp.fromDate(parseLocalDate(document.getElementById('tf-date').value)),reason:document.getElementById('tf-note').value.trim()});
       closeModal();toast('Transfert effectué','success');allTx=await getTransactions();document.getElementById('tx-table').innerHTML=renderTable(allTx);
     };
   };
@@ -1262,7 +1275,7 @@ async function renderBills(container) {
       const name=document.getElementById('bill-name').value.trim(),amount=parseFloat(document.getElementById('bill-amount').value),dueDate=document.getElementById('bill-due').value;
       if(!name||!amount||!dueDate){toast('Remplissez les champs requis','error');return;}
       const autoPay=document.getElementById('bill-autopay').checked;
-      const data={name,amount,dueDate:Timestamp.fromDate(new Date(dueDate)),recurring:document.getElementById('bill-recurring').value==='1',frequency:document.getElementById('bill-freq').value,icon:document.getElementById('bill-icon').value||'📄',notes:document.getElementById('bill-notes').value.trim(),paid:b?.paid||false,autoPay,accountId:autoPay?document.getElementById('bill-account').value:null};
+      const data={name,amount,dueDate:Timestamp.fromDate(parseLocalDate(dueDate)),recurring:document.getElementById('bill-recurring').value==='1',frequency:document.getElementById('bill-freq').value,icon:document.getElementById('bill-icon').value||'📄',notes:document.getElementById('bill-notes').value.trim(),paid:b?.paid||false,autoPay,accountId:autoPay?document.getElementById('bill-account').value:null};
       if(b)await updateBill(b.id,data);else await addBill(data);
       closeModal();toast(b?'Modifiée':'Facture ajoutée','success');renderBills(container);
     };
@@ -1350,15 +1363,15 @@ async function renderReports(container) {
     const d=tx.date?.toDate?tx.date.toDate():new Date(tx.date);
     if(type==='monthly'){const m=document.getElementById('report-month')?.value||now.toISOString().slice(0,7);return d.toISOString().slice(0,7)===m;}
     if(type==='annual'){const yr=parseInt(document.getElementById('report-year')?.value||now.getFullYear());return d.getFullYear()===yr;}
-    if(type==='custom'){const s=new Date(document.getElementById('report-start')?.value),e=new Date(document.getElementById('report-end')?.value);return d>=s&&d<=e;}
+    if(type==='custom'){const s=parseLocalDate(document.getElementById('report-start')?.value),e=parseLocalDate(document.getElementById('report-end')?.value);return d>=s&&d<=e;}
     return true;
   });
 
   document.getElementById('gen-report-btn').onclick=()=>{
     const type=document.getElementById('report-type').value;
     const filtered=filterByPeriod(transactions,type);
-    const income=filtered.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
-    const expenses=filtered.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+    const income=filtered.filter(t=>t.type==='income'&&t.category!=='Virement'&&t.category!=='Transfert').reduce((s,t)=>s+t.amount,0);
+    const expenses=filtered.filter(t=>t.type==='expense'&&t.category!=='Virement'&&t.category!=='Transfert').reduce((s,t)=>s+t.amount,0);
     const balance=income-expenses;
     const byCat={};
     filtered.filter(t=>t.type==='expense').forEach(t=>{byCat[t.category||'Autre']=(byCat[t.category||'Autre']||0)+t.amount;});
@@ -1570,7 +1583,7 @@ async function renderDebts(container) {
       const amount = parseFloat(document.getElementById('pay-amount').value);
       if(!amount||amount<=0){toast('Montant invalide','error');return;}
       const newBal = Math.max(0, bal - amount);
-      await updateDebt(id,{currentBalance:newBal,settled:newBal<=0,lastPaymentDate:Timestamp.fromDate(new Date(document.getElementById('pay-date').value))});
+      await updateDebt(id,{currentBalance:newBal,settled:newBal<=0,lastPaymentDate:Timestamp.fromDate(parseLocalDate(document.getElementById('pay-date').value))});
       closeModal();
       toast(newBal<=0?'🎉 Dette remboursée !':'Paiement enregistré ✓','success');
       renderDebts(container);
@@ -1616,7 +1629,7 @@ async function renderDebts(container) {
         amount: balance,
         minimumPayment: parseFloat(document.getElementById('d-min').value)||0,
         interestRate: parseFloat(document.getElementById('d-rate').value)||0,
-        nextPaymentDate: nextVal?Timestamp.fromDate(new Date(nextVal)):null,
+        nextPaymentDate: nextVal?Timestamp.fromDate(parseLocalDate(nextVal)):null,
         creditor: document.getElementById('d-creditor').value.trim(),
         reason: document.getElementById('d-reason').value.trim(),
         settled: balance<=0,
@@ -1658,8 +1671,8 @@ async function renderStats(container) {
     const d = tx.date?.toDate ? tx.date.toDate() : new Date(tx.date);
     return d.getMonth()===now.getMonth() && d.getFullYear()===now.getFullYear();
   });
-  const monthExpenses = monthTx.filter(t=>t.type==='expense');
-  const monthIncome   = monthTx.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
+  const monthExpenses = monthTx.filter(t=>t.type==='expense'&&t.category!=='Virement'&&t.category!=='Transfert');
+  const monthIncome   = monthTx.filter(t=>t.type==='income'&&t.category!=='Virement'&&t.category!=='Transfert').reduce((s,t)=>s+t.amount,0);
   const monthSpent    = monthExpenses.reduce((s,t)=>s+t.amount,0);
 
   // Budget progress
@@ -1865,7 +1878,7 @@ async function renderScheduled(container) {
     if(t.frequency==='once'){
       await updateScheduledTransfer(id,{active:false,lastExecuted:Timestamp.now()});
     } else {
-      let next = t.nextDate?.toDate ? new Date(t.nextDate.toDate()) : new Date(t.nextDate);
+      let next = t.nextDate?.toDate ? new Date(t.nextDate.toDate()) : parseLocalDate(t.nextDate);
       if(t.frequency==='weekly') next.setDate(next.getDate()+7);
       else if(t.frequency==='biweekly') next.setDate(next.getDate()+14);
       else if(t.frequency==='monthly') next.setMonth(next.getMonth()+1);
@@ -1923,7 +1936,7 @@ async function renderScheduled(container) {
       const data = {
         label, fromAccountId:fromId, toAccountId:toId,
         amount, frequency:freq,
-        nextDate:Timestamp.fromDate(new Date(dateVal)),
+        nextDate:Timestamp.fromDate(parseLocalDate(dateVal)),
         note:document.getElementById('sc-note').value.trim(),
         active:true,
       };
