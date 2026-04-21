@@ -330,6 +330,7 @@ textarea{resize:vertical;min-height:80px}.form-row{display:grid;grid-template-co
       <a href="#" class="nav-item" data-page="planned"><span class="nav-icon">⊙</span> Dépenses planifiées</a>
       <div class="nav-label">Outils</div>
       <a href="#" class="nav-item" data-page="reports"><span class="nav-icon">▦</span> Rapports</a>
+      <a href="#" class="nav-item" data-page="persons"><span class="nav-icon">👤</span> Personnes</a>
       <a href="#" class="nav-item" data-page="search"><span class="nav-icon">⊹</span> Recherche</a>
     </nav>
     <button class="signout-btn" id="signout-btn">↪ Se déconnecter</button>
@@ -485,7 +486,19 @@ async function checkBudgetAlert(category) {
   }
 }
 async function deleteTransaction(id,data) {
-  if(data?.accountId){const acc=await getDoc(dref('accounts',data.accountId));if(acc.exists()){const bal=acc.data().balance||0;const delta=data.type==='income'?-data.amount:data.amount;await updateDoc(dref('accounts',data.accountId),{balance:bal+delta});}}
+  // Reverse the balance effect when deleting
+  if(data?.accountId){
+    const acc=await getDoc(dref('accounts',data.accountId));
+    if(acc.exists()){
+      const bal=acc.data().balance||0;
+      let delta=0;
+      if(data.type==='income')   delta=-data.amount; // was credited → debit back
+      else if(data.type==='expense') delta=data.amount; // was debited → credit back
+      else if(data.type==='transfer'&&data.reason?.startsWith('Virement →')) delta=data.amount; // was debited → credit back
+      else if(data.type==='transfer'&&data.reason?.startsWith('Virement ←')) delta=-data.amount; // was credited → debit back
+      if(delta!==0) await updateDoc(dref('accounts',data.accountId),{balance:bal+delta});
+    }
+  }
   return deleteDoc(dref('transactions',id));
 }
 async function addTransfer(data) {
@@ -562,6 +575,7 @@ async function savePerson(name) {
   const s=await getDocs(query(col('persons'),where('name','==',name)));
   if(s.empty) await addDoc(col('persons'),{name,createdAt:Timestamp.now()});
 }
+async function deletePerson(id) { return deleteDoc(dref('persons',id)); }
 
 async function getCategories() { const s=await getDocs(col('categories')); return s.docs.map(d=>({id:d.id,...d.data()})); }
 async function addCategory(data) { return addDoc(col('categories'),{...data,createdAt:Timestamp.now()}); }
@@ -728,8 +742,7 @@ async function renderDashboard(container) {
 
   container.innerHTML=`
     <div class="stats-grid">
-      <div class="card"><div class="card-title">Revenus ce mois</div><div class="card-value" style="color:var(--green)">${fmt(monthIncome)}</div><div class="card-sub">${now.toLocaleDateString('fr-CA',{month:'long',year:'numeric'})}</div></div>
-      <div class="card"><div class="card-title">Dépenses ce mois</div><div class="card-value" style="color:var(--red)">${fmt(monthExpense)}</div><div class="card-sub">Solde: <span style="color:${monthIncome-monthExpense>=0?'var(--green)':'var(--red)'}">${fmt(monthIncome-monthExpense)}</span></div></div>
+      <div class="card"><div class="card-title">Dépenses ce mois</div><div class="card-value" style="color:var(--red)">${fmt(monthExpense)}</div><div class="card-sub">${now.toLocaleDateString('fr-CA',{month:'long',year:'numeric'})}</div></div>
       <div class="card"><div class="card-title">Total dettes (cartes)</div><div class="card-value" style="color:${totalDebt>0?'var(--red)':'var(--green)'}">${fmt(totalDebt)}</div><div class="card-sub">${accounts.filter(a=>a.type==='credit').length} carte(s) de crédit</div></div>
     </div>
     <div class="grid-2" style="margin-bottom:24px">
@@ -1951,6 +1964,82 @@ async function renderScheduled(container) {
   window._editSched = (id) => showSchedModal(transfers.find(x=>x.id===id));
 }
 
+
+// ── PERSONNES PAGE ─────────────────────────────────────
+async function renderPersons(container) {
+  const [persons, allTx] = await Promise.all([getPersons(), getTransactions()]);
+
+  const renderList = () => {
+    if (persons.length === 0) {
+      return '<div class="empty-state"><div class="empty-icon">👤</div>'
+        +'<div class="empty-title">Aucune personne enregistrée</div>'
+        +'<div class="empty-sub">Les personnes sont ajoutées automatiquement quand vous créez une transaction.</div></div>';
+    }
+    return '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">'
+      + persons.map(p => {
+          const txCount = allTx.filter(t=>t.person===p.name).length;
+          const totalExp = allTx.filter(t=>t.person===p.name&&t.type==='expense').reduce((s,t)=>s+t.amount,0);
+          const totalInc = allTx.filter(t=>t.person===p.name&&t.type==='income').reduce((s,t)=>s+t.amount,0);
+          return '<div class="card" style="display:flex;flex-direction:column;gap:10px">'
+            +'<div style="display:flex;align-items:center;justify-content:space-between">'
+            +'<div style="display:flex;align-items:center;gap:10px">'
+            +'<div style="width:38px;height:38px;border-radius:50%;background:var(--surface2);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;font-size:18px">👤</div>'
+            +'<div><div style="font-weight:600;font-size:14px">'+p.name+'</div>'
+            +'<div style="font-size:11px;color:var(--text3)">'+txCount+' transaction'+(txCount!==1?'s':'')+'</div></div>'
+            +'</div>'
+            +'<button class="btn-danger" style="padding:5px 9px;font-size:12px" onclick="window._deletePerson(\''+p.id+'\',\''+p.name.replace(/'/g,"\\'")+'\')">✕</button>'
+            +'</div>'
+            +(txCount>0?'<div style="display:flex;gap:12px;font-size:12px;font-family:var(--mono)">'
+              +(totalExp>0?'<span class="amount-neg">−'+fmt(totalExp)+'</span>':'')
+              +(totalInc>0?'<span class="amount-pos">+'+fmt(totalInc)+'</span>':'')
+              +'</div>':'')
+            +'</div>';
+        }).join('')
+      +'</div>';
+  };
+
+  container.innerHTML =
+    '<div class="section-header">'
+    +'<div><div class="section-title">👤 Personnes</div>'
+    +'<div style="font-size:12px;color:var(--text3);margin-top:3px">'+persons.length+' personne(s) enregistrée(s)</div></div>'
+    +'<button class="btn-primary" id="add-person-btn">+ Ajouter</button>'
+    +'</div>'
+    +'<div id="persons-list">'+renderList()+'</div>';
+
+  window._deletePerson = (id, name) => {
+    const txCount = allTx.filter(t=>t.person===name).length;
+    openModal('Supprimer la personne',
+      '<p style="color:var(--text2);margin-bottom:6px">Supprimer <strong>'+name+'</strong> de la liste ?</p>'
+      +(txCount>0?'<p style="color:var(--orange);font-size:13px;margin-bottom:18px">⚠ Cette personne apparaît dans '+txCount+' transaction(s). Elles ne seront pas supprimées, mais la personne ne sera plus dans la liste.</p>':'<div style="margin-bottom:18px"></div>')
+      +'<div class="form-actions"><button class="btn-ghost" onclick="closeModal()">Annuler</button><button class="btn-danger" id="confirm-del-person">Supprimer</button></div>'
+    );
+    document.getElementById('confirm-del-person').onclick = async () => {
+      await deletePerson(id);
+      persons.splice(persons.findIndex(p=>p.id===id), 1);
+      closeModal();
+      toast(name+' supprimé(e)','success');
+      document.getElementById('persons-list').innerHTML = renderList();
+    };
+  };
+
+  document.getElementById('add-person-btn').onclick = () => {
+    openModal('Ajouter une personne',
+      '<div class="form-group"><label>Nom *</label><input id="new-person-name" placeholder="Ex: Marie, Jean, Maman..."/></div>'
+      +'<div class="form-actions"><button class="btn-ghost" onclick="closeModal()">Annuler</button><button class="btn-primary" id="save-new-person">Ajouter</button></div>'
+    );
+    document.getElementById('save-new-person').onclick = async () => {
+      const name = document.getElementById('new-person-name').value.trim();
+      if (!name) { toast('Nom requis','error'); return; }
+      await savePerson(name);
+      persons.push({id:'tmp_'+Date.now(), name});
+      closeModal();
+      toast('Personne ajoutée ✓','success');
+      document.getElementById('persons-list').innerHTML = renderList();
+    };
+    setTimeout(()=>document.getElementById('new-person-name')?.focus(), 100);
+  };
+}
+
 const PAGES={
   dashboard:{title:'Tableau de bord',render:renderDashboard},
   stats:{title:'Statistiques',render:renderStats},
@@ -1963,6 +2052,7 @@ const PAGES={
   bills:{title:'Factures',render:renderBills},
   planned:{title:'Dépenses planifiées',render:renderPlanned},
   reports:{title:'Rapports',render:renderReports},
+  persons:{title:'Personnes',render:renderPersons},
   search:{title:'Recherche',render:renderSearch},
 };
 
